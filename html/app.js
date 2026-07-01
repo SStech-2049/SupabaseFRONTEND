@@ -13,10 +13,9 @@
 const SOURCES = [
   { name: 'webinar_registrants', label: 'Registrants — table' },
   { name: 'webinar_events', label: 'Events — table' },
-  { name: 'v_all_registrants', label: 'All registrants — view' },
-  { name: 'v_registered', label: 'Registered — view' },
-  { name: 'v_unregistered', label: 'Unregistered — view' },
-  { name: 'v_no_show', label: 'No-shows — view' },
+  { name: 'v_previous_webinar_registrants', label: 'Previous webinar · registrants — view' },
+  { name: 'v_previous_webinar_no_shows', label: 'Previous webinar · no-shows — view' },
+  { name: 'v_previous_webinar_unregistered', label: 'Previous webinar · unregistered — view' },
 ];
 const SEARCH_COLUMNS = ['email', 'first_name', 'last_name', 'name', 'phone'];
 const ENUM_FILTERS = [
@@ -79,6 +78,33 @@ const el = (tag, props = {}, children = []) => {
 };
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (n) => Number(n).toLocaleString();
+
+/* ---- date display (matches components/Explorer.tsx) ----
+ * Timestamps are stored as UTC (timestamptz). Render them in US Eastern
+ * (EST/EDT, auto-adjusting for daylight saving) so the displayed day/time
+ * matches the business timezone, not the viewer's browser timezone. */
+const DISPLAY_TZ = 'America/New_York';
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// Pure date columns (no time) — parse the literal string so no timezone shift occurs.
+function fmtDateOnly(v) {
+  const [y, m, d] = String(v).slice(0, 10).split('-');
+  if (!y || !m || !d) return String(v);
+  return `${MONTHS[+m - 1] ?? m} ${+d}, ${y}`;
+}
+// Timestamptz columns — convert UTC instant into Eastern wall-clock time.
+function fmtDateTime(v) {
+  const dt = new Date(v);
+  if (isNaN(+dt)) return String(v);
+  const date = dt.toLocaleDateString('en-US', { timeZone: DISPLAY_TZ, month: 'short', day: 'numeric', year: 'numeric' });
+  const time = dt.toLocaleTimeString('en-US', { timeZone: DISPLAY_TZ, hour: 'numeric', minute: '2-digit' });
+  return `${date} · ${time}`;
+}
+function fieldKind(col) {
+  const ft = FIELD_TYPES[col];
+  if (ft?.type === 'date') return 'date';
+  if (ft?.type === 'datetime') return 'datetime';
+  return 'other';
+}
 
 /* ============================================================================
  * Auth gating — swap between login + app views based on Supabase session.
@@ -464,10 +490,13 @@ class Explorer {
   }
 
   /* ---- cell formatter (mirrors fmtCell) ---- */
-  cell(v) {
+  cell(v, col) {
     if (v === null || v === undefined) return el('span', { class: 'pill gray' }, ['—']);
     if (v === true) return el('span', { class: 'bool-yes' }, ['✔']);
     if (v === false) return el('span', { class: 'bool-no' }, ['—']);
+    const kind = fieldKind(col);
+    if (kind === 'date') return document.createTextNode(fmtDateOnly(v));
+    if (kind === 'datetime') return document.createTextNode(fmtDateTime(v));
     if (typeof v === 'object') return document.createTextNode(JSON.stringify(v));
     return document.createTextNode(String(v));
   }
@@ -581,7 +610,7 @@ class Explorer {
         tr.appendChild(btns);
         this.columns.forEach((c) => {
           const td = el('td', { title: String(row[c] ?? '') });
-          td.appendChild(this.cell(row[c]));
+          td.appendChild(this.cell(row[c], c));
           tr.appendChild(td);
         });
         tr.addEventListener('click', () => this.openRow(row));

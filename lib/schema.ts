@@ -10,14 +10,9 @@ export interface SourceDef {
 export const SOURCES: SourceDef[] = [
   { name: 'webinar_registrants', label: 'Registrants — table' },
   { name: 'webinar_events', label: 'Events — table' },
-  { name: 'v_all_registrants', label: 'All registrants — view' },
-  { name: 'v_current_webinar', label: 'Current webinar — view' },
-  { name: 'v_previous_webinar_registrants', label: 'Previous webinar — view' },
+  { name: 'v_previous_webinar_registrants', label: 'Previous webinar · registrants — view' },
   { name: 'v_previous_webinar_no_shows', label: 'Previous webinar · no-shows — view' },
-  { name: 'v_registered', label: 'Registered — view' },
-  { name: 'v_unregistered', label: 'Unregistered — view' },
-  { name: 'v_no_show', label: 'No-shows — view' },
-  { name: 'v_test', label: 'Test — view' },
+  { name: 'v_previous_webinar_unregistered', label: 'Previous webinar · unregistered — view' },
 ];
 
 // Free-text search runs ILIKE across whichever of these columns exist in the source.
@@ -56,6 +51,7 @@ export const FIELD_TYPES: Record<string, FieldType> = {
   registration_status: { type: 'enum', options: ['Registered', 'Not Registered'] },
   traffic_first_source: { type: 'enum', options: ['Organic', 'Paid', 'Email', 'Unknown'] },
   traffic_last_source: { type: 'enum', options: ['Organic', 'Paid', 'Email'] },
+  no_show_status: { type: 'enum', options: ['Send'] },
   registration_date: { type: 'datetime' },
   cf_registration_date_time: { type: 'datetime' },
   created_airtable: { type: 'datetime' },

@@ -71,6 +71,7 @@ const SELECT_OVERRIDES: Record<string, { bg: string; fg: string }> = {
   Organic: { bg: '#e3f5e1', fg: '#1d7a3a' },
   Paid: { bg: '#eae3ff', fg: '#6938c2' },
   Email: { bg: '#e0ecff', fg: '#1c5fd0' },
+  Send: { bg: '#e0ecff', fg: '#1c5fd0' },
   Unknown: { bg: '#e9ecf2', fg: '#4a5568' },
 };
 function selectColor(v: string) {
@@ -86,11 +87,98 @@ function fmtDateOnly(v: any) {
   if (!y || !m || !d) return String(v);
   return `${MONTHS[+m - 1] ?? m} ${+d}, ${y}`;
 }
+// Timestamps are stored as UTC (timestamptz). Render them in US Eastern
+// (EST/EDT, auto-adjusting for daylight saving) so the displayed day/time
+// matches the business timezone instead of the viewer's browser timezone.
+const DISPLAY_TZ = 'America/New_York';
 function fmtDateTime(v: any) {
   const dt = new Date(v);
   if (isNaN(+dt)) return String(v);
-  const time = dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-  return `${MONTHS[dt.getMonth()]} ${dt.getDate()}, ${dt.getFullYear()} · ${time}`;
+  const date = dt.toLocaleDateString('en-US', {
+    timeZone: DISPLAY_TZ,
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+  const time = dt.toLocaleTimeString('en-US', {
+    timeZone: DISPLAY_TZ,
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+  return `${date} · ${time}`;
+}
+
+// ---- Eastern-aware datetime editing ----------------------------------------
+// Stored timestamps are UTC, but the business works in US Eastern. The
+// datetime-local <input> shows/accepts Eastern wall-clock; these helpers
+// convert between that and the UTC ISO string we store.
+
+function easternParts(date: Date) {
+  return Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: DISPLAY_TZ,
+      hour12: false,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+      .formatToParts(date)
+      .map((p) => [p.type, p.value]),
+  ) as Record<string, string>;
+}
+
+// UTC instant -> "YYYY-MM-DDTHH:mm" in Eastern, for a datetime-local input.
+function utcToEasternInput(v: any): string {
+  const dt = new Date(v);
+  if (isNaN(+dt)) return '';
+  const p = easternParts(dt);
+  const hour = p.hour === '24' ? '00' : p.hour;
+  return `${p.year}-${p.month}-${p.day}T${hour}:${p.minute}`;
+}
+
+// ms that Eastern wall-clock is ahead of UTC at the given instant (negative).
+function easternOffsetMs(date: Date): number {
+  const p = easternParts(date);
+  const hour = p.hour === '24' ? 0 : +p.hour;
+  const asUTC = Date.UTC(+p.year, +p.month - 1, +p.day, hour, +p.minute, +p.second);
+  return asUTC - date.getTime();
+}
+
+// "YYYY-MM-DDTHH:mm" interpreted as Eastern wall-clock -> UTC ISO string.
+function easternInputToUtcIso(local: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(local);
+  if (!m) return local;
+  const y = +m[1], mo = +m[2], d = +m[3], h = +m[4], mi = +m[5];
+  let guess = Date.UTC(y, mo - 1, d, h, mi);
+  // Two passes settle DST boundaries.
+  for (let i = 0; i < 2; i++) guess = Date.UTC(y, mo - 1, d, h, mi) - easternOffsetMs(new Date(guess));
+  return new Date(guess).toISOString();
+}
+
+// UTC ISO for a given Eastern calendar date (YYYY-MM-DD) at hh:mm Eastern.
+function easternDateAtToUtcIso(dateStr: string, hh: number, mi: number): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return easternInputToUtcIso(`${dateStr.slice(0, 10)}T${pad(hh)}:${pad(mi)}`);
+}
+
+// Add days to a "YYYY-MM-DD" calendar date (timezone-free).
+function addDaysDateStr(dateStr: string, days: number): string {
+  const [y, m, d] = dateStr.slice(0, 10).split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().slice(0, 10);
+}
+
+function todayEasternDateStr(): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: DISPLAY_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
 }
 
 // ---- tiny inline field-type icons (monochrome, currentColor) ---------------
@@ -166,6 +254,15 @@ export default function Explorer({ userEmail }: { userEmail: string }) {
   const [drawer, setDrawer] = useState<DrawerMode>(null);
   const [drawerRow, setDrawerRow] = useState<any>(null);
   const [saving, setSaving] = useState(false);
+
+  // ---- shared hidden-columns config (saved for EVERYONE via /api/settings) ----
+  const [hiddenMap, setHiddenMap] = useState<Record<string, string[]>>({});
+  const [colPanelOpen, setColPanelOpen] = useState(false);
+  const [savingCols, setSavingCols] = useState(false);
+
+  // ---- "Trigger no-shows" webhook (only on the no-shows view) ----
+  const [triggerOpen, setTriggerOpen] = useState(false);
+  const [triggering, setTriggering] = useState(false);
 
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toast = useCallback((msg: string, kind: 'ok' | 'err' = 'ok') => {
@@ -341,9 +438,27 @@ export default function Explorer({ userEmail }: { userEmail: string }) {
   }
 
   // ---- CRUD ----
-  function openCreate() {
+  async function openCreate() {
     const blank: any = {};
     columns.forEach((c) => (blank[c] = ''));
+
+    // New webinar: default the dates to (previous webinar date + 7 days), with
+    // the webinar at 8:30 PM ET and the end at 9:30 PM ET. Still fully editable.
+    if (source === 'webinar_events') {
+      try {
+        const res = await fetch('/api/data?source=webinar_events&sort=webinar_date&order=desc&page=1&pageSize=1');
+        const j = await res.json();
+        const prev = j?.rows?.[0]?.webinar_date ?? j?.rows?.[0]?.webinar_date_time;
+        const prevDate = prev ? String(prev).slice(0, 10) : todayEasternDateStr();
+        const nextDate = addDaysDateStr(prevDate, 7);
+        if (columns.includes('webinar_date')) blank.webinar_date = nextDate;
+        if (columns.includes('webinar_date_time')) blank.webinar_date_time = easternDateAtToUtcIso(nextDate, 20, 30);
+        if (columns.includes('end_date')) blank.end_date = easternDateAtToUtcIso(nextDate, 21, 30);
+      } catch {
+        /* non-fatal — open with empty dates if the lookup fails */
+      }
+    }
+
     setDrawerRow(blank);
     setDrawer('create');
   }
@@ -362,7 +477,9 @@ export default function Explorer({ userEmail }: { userEmail: string }) {
     const values: Record<string, any> = {};
     form.querySelectorAll<HTMLElement>('[data-col]').forEach((el) => {
       const col = el.getAttribute('data-col')!;
-      const v = (el as HTMLInputElement).value;
+      let v = (el as HTMLInputElement).value;
+      // datetime-local fields are entered in Eastern wall-clock → store as UTC.
+      if (v !== '' && FIELD_TYPES[col]?.type === 'datetime') v = easternInputToUtcIso(v);
       values[col] = v === '' ? null : v === 'true' ? true : v === 'false' ? false : v;
     });
     setSaving(true);
@@ -428,6 +545,102 @@ export default function Explorer({ userEmail }: { userEmail: string }) {
       .finally(() => id === reqId.current && setLoading(false));
   }, [buildParams]);
 
+  // ---- hidden columns: load once (shared), derive visible/hidden, save on change ----
+  useEffect(() => {
+    fetch('/api/settings')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d && d.hiddenColumns && typeof d.hiddenColumns === 'object') setHiddenMap(d.hiddenColumns);
+      })
+      .catch(() => {
+        /* non-fatal — fall back to showing all columns */
+      });
+  }, []);
+
+  const hiddenForSource = useMemo(() => hiddenMap[source] ?? [], [hiddenMap, source]);
+  const visibleColumns = useMemo(
+    () => columns.filter((c) => !hiddenForSource.includes(c)),
+    [columns, hiddenForSource],
+  );
+  const hiddenColsPresent = useMemo(
+    () => columns.filter((c) => hiddenForSource.includes(c)),
+    [columns, hiddenForSource],
+  );
+
+  const saveHidden = useCallback(
+    async (nextMap: Record<string, string[]>) => {
+      setHiddenMap(nextMap); // optimistic
+      setSavingCols(true);
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hiddenColumns: nextMap }),
+        });
+        const j = await res.json();
+        if (!res.ok) throw new Error(j.error || 'Save failed');
+        if (j.hiddenColumns) setHiddenMap(j.hiddenColumns); // adopt server-sanitized map
+        toast('Column settings saved for everyone', 'ok');
+      } catch (e: any) {
+        toast(e.message || 'Could not save column settings', 'err');
+      } finally {
+        setSavingCols(false);
+      }
+    },
+    [toast],
+  );
+
+  function hideColumn(col: string) {
+    const cur = hiddenMap[source] ?? [];
+    if (cur.includes(col)) return;
+    saveHidden({ ...hiddenMap, [source]: [...cur, col] });
+  }
+  function showColumn(col: string) {
+    const cur = hiddenMap[source] ?? [];
+    saveHidden({ ...hiddenMap, [source]: cur.filter((c) => c !== col) });
+  }
+  function showAllColumns() {
+    saveHidden({ ...hiddenMap, [source]: [] });
+  }
+
+  // ---- trigger no-shows webhook ----
+  async function runTrigger(mode: 'all' | 'one') {
+    if (
+      mode === 'all' &&
+      !confirm(
+        'Send ALL no-shows with an empty no_show_status to the webhook, one by one?\n\nThis may fire many requests.',
+      )
+    ) {
+      return;
+    }
+    setTriggerOpen(false);
+    setTriggering(true);
+    try {
+      const res = await fetch('/api/trigger-noshows', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || 'Trigger failed');
+      if (j.total === 0) {
+        toast(j.message || 'No matching rows to send', 'ok');
+      } else if (j.failed > 0) {
+        toast(`Sent ${j.sent}/${j.total} — ${j.failed} failed`, 'err');
+      } else {
+        toast(
+          `Sent ${j.sent} no-show${j.sent === 1 ? '' : 's'} to the webhook` +
+            (j.capped ? ` (capped — run again to send more)` : ''),
+          'ok',
+        );
+      }
+    } catch (e: any) {
+      toast(e.message || 'Trigger failed', 'err');
+    } finally {
+      setTriggering(false);
+    }
+  }
+
   const activeSource = SOURCES.find((s) => s.name === source);
 
   return (
@@ -438,6 +651,73 @@ export default function Explorer({ userEmail }: { userEmail: string }) {
           <h1>Webinar Admin</h1>
         </div>
         <span className="spacer" />
+
+        <div className="col-menu">
+          <button
+            className={hiddenForSource.length ? 'on' : ''}
+            onClick={() => setColPanelOpen((o) => !o)}
+            title="Show / hide columns — saved for everyone"
+          >
+            ▦ Columns{hiddenForSource.length ? ` · ${hiddenForSource.length} hidden` : ''}
+          </button>
+          {colPanelOpen && (
+            <>
+              <div className="col-panel-backdrop" onClick={() => setColPanelOpen(false)} />
+              <div className="col-panel" onClick={(e) => e.stopPropagation()}>
+                <div className="cp-head">
+                  <h4>Columns</h4>
+                  {savingCols && <span className="spin" />}
+                  <button className="cp-close" onClick={() => setColPanelOpen(false)}>✕</button>
+                </div>
+                <p className="cp-hint">🌐 Changes are saved for everyone.</p>
+
+                {columns.length === 0 ? (
+                  <div className="cp-empty">Load some records first to manage columns.</div>
+                ) : (
+                  <>
+                    <div className="cp-section-label">
+                      Shown <span>({visibleColumns.length})</span>
+                    </div>
+                    {visibleColumns.map((c) => (
+                      <div className="col-item" key={c}>
+                        <span className="ci-ic"><FieldIcon kind={fieldKind(c)} /></span>
+                        <span className="ci-name" title={c}>{humanize(c)}</span>
+                        <button
+                          onClick={() => hideColumn(c)}
+                          disabled={visibleColumns.length <= 1}
+                          title={visibleColumns.length <= 1 ? 'Keep at least one column visible' : 'Hide this column'}
+                        >
+                          Hide
+                        </button>
+                      </div>
+                    ))}
+
+                    <div className="cp-section-label" style={{ marginTop: 14 }}>
+                      Hidden <span>({hiddenColsPresent.length})</span>
+                      {hiddenColsPresent.length > 0 && (
+                        <button className="cp-showall" onClick={showAllColumns}>Show all</button>
+                      )}
+                    </div>
+                    {hiddenColsPresent.length === 0 ? (
+                      <div className="cp-empty">No hidden columns.</div>
+                    ) : (
+                      hiddenColsPresent.map((c) => (
+                        <div className="col-item is-hidden" key={c}>
+                          <span className="ci-ic"><FieldIcon kind={fieldKind(c)} /></span>
+                          <span className="ci-name" title={c}>{humanize(c)}</span>
+                          <button className="primary" onClick={() => showColumn(c)} title="Show this column">
+                            Show
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
         <span className="userbar">
           <span className="who">{userEmail}</span>
           <button onClick={logout}>Log out</button>
@@ -535,6 +815,39 @@ export default function Explorer({ userEmail }: { userEmail: string }) {
         <a href={'/api/export?' + buildParams(true).toString()}>
           <button>⬇ Export CSV</button>
         </a>
+
+        {source === 'v_previous_webinar_no_shows' && (
+          <div className="trigger-menu">
+            <button
+              className="btn-trigger"
+              onClick={() => setTriggerOpen((o) => !o)}
+              disabled={triggering}
+              title="Send no-shows (empty no_show_status) to the webhook"
+            >
+              {triggering ? (
+                <><span className="spin" /> Sending…</>
+              ) : (
+                <>⚡ Trigger no-shows ▾</>
+              )}
+            </button>
+            {triggerOpen && (
+              <>
+                <div className="col-panel-backdrop" onClick={() => setTriggerOpen(false)} />
+                <div className="trigger-panel" onClick={(e) => e.stopPropagation()}>
+                  <button className="tg-item" disabled={triggering} onClick={() => runTrigger('all')}>
+                    <span className="tg-title">Send all</span>
+                    <span className="tg-sub">Every no-show with an empty status, one by one</span>
+                  </button>
+                  <button className="tg-item" disabled={triggering} onClick={() => runTrigger('one')}>
+                    <span className="tg-title">Send 1 (test)</span>
+                    <span className="tg-sub">Send a single row to verify the webhook</span>
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {writable && (
           <button className="primary" onClick={openCreate}>
             + {source === 'webinar_events' ? 'New webinar' : 'New record'}
@@ -558,7 +871,7 @@ export default function Explorer({ userEmail }: { userEmail: string }) {
             <thead>
               <tr>
                 <th className="gutter-h" />
-                {columns.map((c) => (
+                {visibleColumns.map((c) => (
                   <th key={c} onClick={() => toggleSort(c)} title={c} className={sort === c ? 'sorted' : ''}>
                     <span className="col-head">
                       <span className="col-ic"><FieldIcon kind={fieldKind(c)} /></span>
@@ -576,7 +889,7 @@ export default function Explorer({ userEmail }: { userEmail: string }) {
                     <span className="rownum">{fromRow + i}</span>
                     <span className="expand" title={writable ? 'Open record' : 'View record'}><ExpandGlyph /></span>
                   </td>
-                  {columns.map((c) => (
+                  {visibleColumns.map((c) => (
                     <td key={c} title={row[c] == null ? '' : String(row[c])}>
                       {renderCell(c, row[c])}
                     </td>
@@ -685,7 +998,7 @@ function DrawerForm({
       return <input type="date" className="field-in" data-col={col} defaultValue={d} disabled={disabled} />;
     }
     if (ft?.type === 'datetime') {
-      const dt = val ? String(val).slice(0, 16) : ''; // YYYY-MM-DDTHH:mm
+      const dt = val ? utcToEasternInput(val) : ''; // Eastern wall-clock for the input
       return <input type="datetime-local" className="field-in" data-col={col} defaultValue={dt} disabled={disabled} />;
     }
 
