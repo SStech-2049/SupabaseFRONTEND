@@ -5,7 +5,13 @@ Browse / search / filter / sort / export and full **CRUD** on the base tables, w
 exposed read-only. Gated by **Supabase Auth** (individual logins). Deployable to Vercel.
 
 Built with Next.js 14 (App Router) + TypeScript. All data queries run **server-side** with the
-service-role key — it never reaches the browser. Auth uses the public anon key (login only).
+secret key — it never reaches the browser. Auth uses the public publishable key (login only).
+
+> **Keys:** this project has legacy JWT keys (`anon` / `service_role`, starting `eyJ…`) disabled —
+> using one fails with *"Legacy API keys are disabled"*. Use the new keys from
+> **Dashboard → Project Settings → API Keys**: the **publishable** key (`sb_publishable_…`) and the
+> **secret** key (`sb_secret_…`). The env var names below still say `ANON` / `SERVICE_ROLE` for
+> compatibility; only the values changed.
 
 ## How it's secured
 
@@ -24,8 +30,8 @@ service-role key — it never reaches the browser. Auth uses the public anon key
    ```bash
    cp .env.example .env.local
    ```
-   - `SUPABASE_SERVICE_ROLE_KEY` — Dashboard → Settings → API → **service_role** (secret)
-   - `NEXT_PUBLIC_SUPABASE_ANON_KEY` — Dashboard → Settings → API → **anon / public**
+   - `SUPABASE_SERVICE_ROLE_KEY` — Dashboard → Project Settings → API Keys → **secret** key (`sb_secret_…`)
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY` — Dashboard → Project Settings → API Keys → **publishable** key (`sb_publishable_…`)
 2. Create at least one login: Dashboard → **Authentication → Users → Add user** (email + password).
    There is no public sign-up by design.
 3. Run:
@@ -44,6 +50,7 @@ service-role key — it never reaches the browser. Auth uses the public anon key
    - `SUPABASE_SERVICE_ROLE_KEY`  ← keep this one secret; it's server-only
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+   `NEXT_PUBLIC_*` values are baked in at build time, so after changing them **redeploy**.
 4. Deploy. Add users in Supabase → Authentication → Users to grant access.
 5. In Supabase → Authentication → URL Configuration, add your Vercel domain to the allowed
    redirect/site URLs (so auth cookies work on the deployed domain).

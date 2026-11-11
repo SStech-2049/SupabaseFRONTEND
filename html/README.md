@@ -41,9 +41,11 @@ read/write access. This static site has **no server**, so it uses the public
   `anon` / `authenticated` role access to those tables and views. If a tab
   shows "No rows" or a save fails with a permissions error, that's RLS — add a
   policy in Supabase, don't paste the service-role key here.
-- **Never put the `service_role` key in `config.js`.** It bypasses RLS and would
-  be visible to anyone who opens the page — a full database compromise. The anon
-  key is the only key that belongs in browser code.
+- **Never put the secret (`sb_secret_…`) or `service_role` key in `config.js`.**
+  It bypasses RLS and would be visible to anyone who opens the page — a full
+  database compromise. The publishable key (`sb_publishable_…`) is the only key
+  that belongs in browser code. Legacy JWT anon keys (`eyJ…`) are disabled on
+  this project.
 - **The n8n "new webinar" backfill webhook is omitted** — its URL was a
   server-only secret. Creating a webinar still inserts the row; it just doesn't
   fire the webhook.

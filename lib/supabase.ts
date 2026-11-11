@@ -19,7 +19,7 @@ export function assertConfigured() {
   if (!url) throw new Error('SUPABASE_URL missing in .env.local');
   if (!serviceKey || serviceKey === 'paste_service_role_key_here') {
     throw new Error(
-      'SUPABASE_SERVICE_ROLE_KEY missing in .env.local. Get it from Supabase Dashboard > Project Settings > API > service_role.',
+      'SUPABASE_SERVICE_ROLE_KEY missing in .env.local. Use the secret key (sb_secret_...) from Supabase Dashboard > Project Settings > API Keys.',
     );
   }
 }
